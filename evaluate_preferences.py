@@ -46,10 +46,16 @@ def calculate_preference_consistency(preferences_df):
             ]
             
             # Count preferences for each alternative
+            # Exclude entries where model_choice is -1 (invalid/unparseable responses)
             pref_counts = {}
             for _, row in pair_df.iterrows():
                 # Handle both string and integer model_choice values
                 choice = row['model_choice']
+                # Explicitly exclude -1 values (invalid responses that couldn't be parsed)
+                # These entries should not count as consistent or inconsistent
+                if pd.isna(choice) or choice == -1 or choice == '-1':
+                    continue  # Skip invalid entries
+                # Only process valid choices (1 or 2)
                 if choice in [1, 2, '1', '2']:
                     # Determine which response was preferred
                     if choice == 1 or choice == '1':
@@ -80,6 +86,25 @@ def calculate_preference_consistency(preferences_df):
     
     return pd.DataFrame(consistency_results)
 
+def calculated_valid_response_frequency(preferences_df):
+    """
+    Calculate the percentage of entries that contain valid responses.
+    A valid response is one where model_choice is 1, 2, '1', or '2'.
+    Invalid responses (where model_choice is -1, '-1', or NaN) are excluded.
+    
+    Returns:
+        float: Percentage (0-100) of valid responses
+    """
+    # Count valid responses: must be 1, 2, '1', or '2'
+    # This matches the logic in calculate_preference_consistency
+    valid_mask = preferences_df['model_choice'].isin([1, 2, '1', '2'])
+    valid_count = valid_mask.sum()
+    total_count = len(preferences_df)
+    if total_count > 0:
+        return (valid_count / total_count) * 100.0
+    else:
+        return 0.0
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate preference consistency")
     parser.add_argument("--input", type=str, default="preferences_model_8B_C013_pairs0-52122_3runs.csv",
@@ -99,6 +124,17 @@ def main():
     avg_consistency = consistency_df['preference_consistency'].mean()
     print(f"Average preference consistency: {avg_consistency:.2f}%")
 
-    
+    # percent of questions with consistency > 70%
+    percent_questions_with_consistency_gt_70 = len(consistency_df[consistency_df['preference_consistency'] > 70]) / len(consistency_df) * 100.0
+    print(f"Percent of questions with consistency > 70%: {percent_questions_with_consistency_gt_70:.2f}%")
+
+    # percent of questions with consistency > 80%
+    percent_questions_with_consistency_gt_80 = len(consistency_df[consistency_df['preference_consistency'] > 80]) / len(consistency_df) * 100.0
+    print(f"Percent of questions with consistency > 80%: {percent_questions_with_consistency_gt_80:.2f}%")
+
+    # calculate valid response frequency
+    valid_response_frequency = calculated_valid_response_frequency(preferences_df)
+    print(f"Valid response frequency: {valid_response_frequency:.2f}%")
+
 if __name__ == "__main__":
     main()

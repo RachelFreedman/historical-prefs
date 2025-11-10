@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 import os
 import subprocess
+from collections import defaultdict
 from huggingface_hub import HfApi
 from evaluate_preferences import calculate_preference_consistency
 
@@ -216,7 +217,62 @@ def main():
     # Generate preferences - ask each question n_runs times in each order
     preferences = []
     total_runs = len(sample_df) * 2 * args.n_runs
-    for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Generating preferences"):
+    
+    # Setup checkpointing - save every 1000 comparisons to avoid data loss
+    checkpoint_interval = 1000
+    scratch_output_dir = Path('/scratch/rachel/historical-prefs/data/prefs')
+    scratch_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Also create local output dir for symlink
+    local_output_dir = Path(datapath) / 'prefs'
+    local_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    filename = f"preferences_model_{args.model_size}_{args.model_century}_pairs{args.start_idx}-{end_idx}_{args.n_runs}runs.csv"
+    scratch_output_path = scratch_output_dir / filename
+    
+    # Check if there's a checkpoint to resume from
+    checkpoint_path = scratch_output_dir / f"{filename}.checkpoint"
+    processed_indices = set()
+    if checkpoint_path.exists():
+        print(f"Found checkpoint file: {checkpoint_path}")
+        print("Loading checkpoint...")
+        checkpoint_df = pd.read_csv(checkpoint_path, sep='\t')
+        print(f"Loaded {len(checkpoint_df)} preferences from checkpoint")
+        # Convert checkpoint back to list of dicts
+        preferences = checkpoint_df.to_dict('records')
+        # Determine which comparisons have been fully processed
+        # Each comparison generates 2 * n_runs preferences (original + reversed, each n_runs times)
+        # We need to normalize the key since reversed order swaps response_1_id and response_2_id
+        comparison_counts = defaultdict(int)
+        for pref in preferences:
+            # Normalize key: sort response IDs to handle both original and reversed orders
+            question_id = pref['question_id']
+            resp1 = pref['response_1_id']
+            resp2 = pref['response_2_id']
+            # Create normalized key with sorted response IDs
+            normalized_key = (question_id, tuple(sorted([resp1, resp2])))
+            comparison_counts[normalized_key] += 1
+        
+        # Find which comparisons are complete (have 2 * n_runs entries)
+        for key, count in comparison_counts.items():
+            if count >= 2 * args.n_runs:
+                question_id, (resp1, resp2) = key[0], key[1]
+                # Find the row index in sample_df that matches this comparison
+                # (order of response_1_id and response_2_id doesn't matter)
+                for df_idx, df_row in sample_df.iterrows():
+                    if (df_row['question_id'] == question_id and 
+                        set([df_row['response_1_id'], df_row['response_2_id']]) == set([resp1, resp2])):
+                        processed_indices.add(df_idx)
+                        break
+        
+        print(f"Resuming from {len(preferences)} preferences ({len(processed_indices)} comparisons already processed)")
+    
+    processed_count = len(processed_indices)
+    for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Generating preferences", initial=processed_count):
+        # Skip if this comparison was already processed
+        if idx in processed_indices:
+            continue
+            
         # Run original order n_runs times
         for run_num in range(args.n_runs):
             try:
@@ -318,18 +374,65 @@ def main():
                     'order': 'reversed',
                     'run': run_num + 1
                 })
+        
+        # Periodic checkpointing to avoid data loss (after each comparison is complete)
+        # Checkpoint every N comparisons to avoid losing too much work
+        comparisons_completed = (len(preferences) - (len(preferences) % (2 * args.n_runs))) // (2 * args.n_runs)
+        checkpoint_every_n_comparisons = max(100, checkpoint_interval // (2 * args.n_runs))  # Checkpoint every ~100 comparisons
+        if comparisons_completed > 0 and comparisons_completed % checkpoint_every_n_comparisons == 0:
+            try:
+                checkpoint_df = pd.DataFrame(preferences)
+                checkpoint_df.to_csv(checkpoint_path, sep='\t', index=False)
+                print(f"\n[Checkpoint] Saved {len(preferences)} preferences ({comparisons_completed} comparisons) to {checkpoint_path}")
+            except Exception as e:
+                print(f"\n[Warning] Failed to save checkpoint: {e}")
+                # If checkpoint fails due to disk space, try saving to a different location
+                if "Disk quota exceeded" in str(e) or (hasattr(e, 'errno') and e.errno == 122):
+                    alt_checkpoint = Path('/scratch/rachel') / f"{filename}.checkpoint"
+                    try:
+                        checkpoint_df = pd.DataFrame(preferences)
+                        checkpoint_df.to_csv(alt_checkpoint, sep='\t', index=False)
+                        print(f"[Checkpoint] Saved to alternative location: {alt_checkpoint}")
+                    except:
+                        pass
     
-    # Save results
+    # Save final results to scratch (has more space)
     preferences_df = pd.DataFrame(preferences)
-    filename = f"preferences_model_{args.model_size}_{args.model_century}_pairs{args.start_idx}-{end_idx}_{args.n_runs}runs.csv"
     
-    # Create output directory if it doesn't exist
-    output_dir = Path(datapath) / 'prefs'
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_path = output_dir / filename
-    preferences_df.to_csv(output_path, sep='\t', index=False)
-    print(f"\nSaved preferences to {output_path}")
+    try:
+        # Save to scratch first (more space available)
+        preferences_df.to_csv(scratch_output_path, sep='\t', index=False)
+        print(f"\nSaved preferences to {scratch_output_path}")
+        
+        # Create symlink in local directory for easy access
+        local_output_path = local_output_dir / filename
+        if local_output_path.exists() or local_output_path.is_symlink():
+            local_output_path.unlink()
+        local_output_path.symlink_to(scratch_output_path)
+        print(f"Created symlink: {local_output_path} -> {scratch_output_path}")
+        
+        # Clean up checkpoint file if final save succeeded
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            print(f"Removed checkpoint file: {checkpoint_path}")
+            
+    except OSError as e:
+        if "Disk quota exceeded" in str(e) or e.errno == 122:
+            print(f"\n[ERROR] Disk quota exceeded when saving to {scratch_output_path}")
+            print(f"[INFO] Data is still in memory. Attempting to save to alternative location...")
+            # Try saving to a different location in scratch
+            alt_path = Path('/scratch/rachel') / filename
+            try:
+                preferences_df.to_csv(alt_path, sep='\t', index=False)
+                print(f"[SUCCESS] Saved to alternative location: {alt_path}")
+                print(f"[INFO] You can move this file later or create a symlink")
+            except Exception as e2:
+                print(f"[CRITICAL] Failed to save to alternative location: {e2}")
+                print(f"[INFO] {len(preferences)} preferences are still in memory")
+                print(f"[INFO] Checkpoint file may exist at: {checkpoint_path}")
+                raise
+        else:
+            raise
     
     # Calculate and report preference consistency
     consistency_df = calculate_preference_consistency(preferences_df)
