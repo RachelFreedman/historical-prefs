@@ -19,6 +19,7 @@ import os
 
 NAS_BASE = Path("/nas/ucb/rachel/historical-prefs")
 LOCAL_BASE = Path(__file__).parent / "data"
+PROFILES_PATH = Path(__file__).parent / "data" / "profiles.json"
 
 # =============================================================================
 # Environment Configuration

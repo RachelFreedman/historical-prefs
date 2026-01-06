@@ -59,14 +59,16 @@ class CheckpointManager:
     Manages checkpointing for long-running preference generation.
     
     Handles saving/loading checkpoints and tracking which comparisons
-    have been fully processed to enable resumption.
+    have been fully processed to enable resumption. Supports multi-user
+    generation by tracking (user_id, pair_index) combinations.
     """
     
     def __init__(
         self,
         checkpoint_path: Path,
         n_runs: int,
-        checkpoint_interval: Optional[int] = None
+        checkpoint_interval: Optional[int] = None,
+        user_ids: list[int] | None = None
     ):
         """
         Initialize checkpoint manager.
@@ -75,13 +77,16 @@ class CheckpointManager:
             checkpoint_path: Path for checkpoint file
             n_runs: Number of runs per comparison (for determining completion)
             checkpoint_interval: Save checkpoint every N comparisons
+            user_ids: List of user IDs being processed (None for single-user mode)
         """
         self.checkpoint_path = checkpoint_path
         self.n_runs = n_runs
         self.checkpoint_interval = checkpoint_interval or PROCESSING_CONFIG.checkpoint_interval
+        self.user_ids = user_ids or []
         
         self.preferences: list[dict[str, Any]] = []
-        self.processed_indices: Set[int] = set()
+        # Track by (user_id, pair_index) for multi-user, or just pair_index for single-user
+        self.processed_keys: Set[tuple[int | None, int]] = set()
         self._comparisons_since_checkpoint = 0
     
     def load_checkpoint(self, sample_df: pd.DataFrame) -> bool:
@@ -105,36 +110,44 @@ class CheckpointManager:
         
         self.preferences = checkpoint_df.to_dict('records')
         
-        # Determine which comparisons are complete
+        # Determine which (user_id, comparison) pairs are complete
         # Each comparison generates 2 * n_runs preferences (original + reversed)
+        # Key: (user_id, question_id, sorted_response_ids)
         comparison_counts: dict[tuple, int] = defaultdict(int)
         
         for pref in self.preferences:
             question_id = pref['question_id']
             resp1 = pref['response_1_id']
             resp2 = pref['response_2_id']
-            normalized_key = (question_id, tuple(sorted([str(resp1), str(resp2)])))
+            user_id = pref.get('user_id')  # None for single-user mode
+            normalized_key = (user_id, question_id, tuple(sorted([str(resp1), str(resp2)])))
             comparison_counts[normalized_key] += 1
         
         # Find completed comparisons
         for key, count in comparison_counts.items():
             if count >= 2 * self.n_runs:
-                question_id, (resp1, resp2) = key[0], key[1]
+                user_id, question_id, (resp1, resp2) = key
                 for df_idx, df_row in sample_df.iterrows():
                     row_resp1 = str(df_row['response_1_id'])
                     row_resp2 = str(df_row['response_2_id'])
                     if (df_row['question_id'] == question_id and 
                         set([row_resp1, row_resp2]) == set([resp1, resp2])):
-                        self.processed_indices.add(df_idx)
+                        self.processed_keys.add((user_id, df_idx))
                         break
         
         print(f"Resuming: {len(self.preferences)} preferences, "
-              f"{len(self.processed_indices)} comparisons already processed")
+              f"{len(self.processed_keys)} (user, comparison) pairs already processed")
         return True
     
-    def is_processed(self, idx: int) -> bool:
-        """Check if a comparison index has been fully processed."""
-        return idx in self.processed_indices
+    def is_processed(self, idx: int, user_id: int | None = None) -> bool:
+        """
+        Check if a comparison index has been fully processed.
+        
+        Args:
+            idx: DataFrame index of the comparison
+            user_id: User ID (None for single-user mode)
+        """
+        return (user_id, idx) in self.processed_keys
     
     def add_preference(self, preference: dict[str, Any]) -> None:
         """Add a preference result."""
@@ -147,8 +160,10 @@ class CheckpointManager:
         Args:
             force: If True, save regardless of interval
         """
-        entries_per_comparison = 2 * self.n_runs
-        total_comparisons = len(self.preferences) // entries_per_comparison
+        # Calculate entries per comparison based on number of users
+        n_users = max(1, len(self.user_ids))
+        entries_per_comparison = 2 * self.n_runs * n_users
+        total_comparisons = len(self.preferences) // entries_per_comparison if entries_per_comparison > 0 else 0
         
         should_save = force or (
             total_comparisons > 0 and 
@@ -169,7 +184,9 @@ class CheckpointManager:
             checkpoint_df = pd.DataFrame(self.preferences)
             checkpoint_df.to_csv(self.checkpoint_path, sep='\t', index=False)
             
-            comparisons = len(self.preferences) // (2 * self.n_runs)
+            n_users = max(1, len(self.user_ids))
+            entries_per_comparison = 2 * self.n_runs * n_users
+            comparisons = len(self.preferences) // entries_per_comparison if entries_per_comparison > 0 else 0
             print(f"\n[Checkpoint] Saved {len(self.preferences)} preferences "
                   f"({comparisons} comparisons) to {self.checkpoint_path}")
         except Exception as e:

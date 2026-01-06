@@ -6,12 +6,20 @@ This module provides common functionality used across CA and PRISM datasets:
 - Model loading and version management
 - File operations with NAS/symlink support
 - Preference generation utilities
+- User profile management
 """
 
 from .gpu_utils import find_available_gpu
 from .model_utils import find_latest_model_version, load_model_and_tokenizer
 from .file_utils import save_with_symlink, CheckpointManager
 from .preference_utils import generate_preference, parse_model_response
+from .profile_utils import (
+    load_profiles,
+    get_profiles_for_century,
+    get_profile_by_id,
+    get_user_ids_for_century,
+    parse_user_ids,
+)
 
 __all__ = [
     "find_available_gpu",
@@ -21,5 +29,10 @@ __all__ = [
     "CheckpointManager",
     "generate_preference",
     "parse_model_response",
+    "load_profiles",
+    "get_profiles_for_century",
+    "get_profile_by_id",
+    "get_user_ids_for_century",
+    "parse_user_ids",
 ]
 

@@ -162,6 +162,115 @@ def calculate_agreement_with_human(preferences_df: pd.DataFrame) -> Optional[dic
     }
 
 
+def calculate_user_agreement(preferences_df: pd.DataFrame) -> Optional[dict[str, Any]]:
+    """
+    Calculate within-user and between-user pairwise agreement.
+    
+    This metric compares how consistently users agree with themselves
+    versus how much they agree with other users. If user profiles are
+    creating meaningful differentiation:
+    - within_user_agreement should be HIGH (users are internally consistent)
+    - between_user_agreement should be LOWER (users disagree with each other)
+    
+    Agreement is calculated by comparing pairs of individual runs:
+    - Within-user: pairs of runs from the SAME user
+    - Between-user: pairs of runs from DIFFERENT users
+    
+    Args:
+        preferences_df: DataFrame with preference data including 'user_id' column
+        
+    Returns:
+        Dictionary with within_user_agreement, between_user_agreement, 
+        and the difference (within - between), or None if not applicable
+    """
+    if 'user_id' not in preferences_df.columns:
+        return None
+    
+    # Filter to valid responses only
+    valid_mask = preferences_df['model_choice'].isin([1, 2, '1', '2'])
+    valid_df = preferences_df[valid_mask].copy()
+    
+    if len(valid_df) == 0:
+        return None
+    
+    # Normalize model_choice to string for consistent comparison
+    valid_df['choice_normalized'] = valid_df['model_choice'].apply(
+        lambda x: str(int(float(x))) if pd.notna(x) else None
+    )
+    
+    # Get unique user IDs
+    user_ids = valid_df['user_id'].dropna().unique()
+    if len(user_ids) < 2:
+        return {
+            'within_user_agreement': None,
+            'between_user_agreement': None,
+            'difference': None,
+            'error': 'Need at least 2 users for comparison'
+        }
+    
+    # Get unique question pairs (identified by question_id and response pair)
+    valid_df['pair_key'] = valid_df.apply(
+        lambda r: (r['question_id'], tuple(sorted([str(r['response_1_id']), str(r['response_2_id'])]))),
+        axis=1
+    )
+    unique_pairs = valid_df['pair_key'].unique()
+    
+    within_agreements = 0
+    within_total = 0
+    between_agreements = 0
+    between_total = 0
+    
+    for pair_key in tqdm(unique_pairs, desc="Calculating user agreement", unit="pair"):
+        pair_df = valid_df[valid_df['pair_key'] == pair_key]
+        
+        # Group runs by user
+        user_runs: dict[int, list[str]] = {}
+        for _, row in pair_df.iterrows():
+            uid = row['user_id']
+            choice = row['choice_normalized']
+            if uid is not None and choice is not None:
+                if uid not in user_runs:
+                    user_runs[uid] = []
+                user_runs[uid].append(choice)
+        
+        # Calculate within-user agreement (compare runs from same user)
+        for uid, runs in user_runs.items():
+            if len(runs) < 2:
+                continue
+            # Compare all pairs of runs from this user
+            for i in range(len(runs)):
+                for j in range(i + 1, len(runs)):
+                    within_total += 1
+                    if runs[i] == runs[j]:
+                        within_agreements += 1
+        
+        # Calculate between-user agreement (compare runs from different users)
+        user_ids_in_pair = list(user_runs.keys())
+        for i, uid1 in enumerate(user_ids_in_pair):
+            for uid2 in user_ids_in_pair[i + 1:]:
+                # Compare all runs from user1 with all runs from user2
+                for run1 in user_runs[uid1]:
+                    for run2 in user_runs[uid2]:
+                        between_total += 1
+                        if run1 == run2:
+                            between_agreements += 1
+    
+    within_agreement_rate = (within_agreements / within_total * 100) if within_total > 0 else None
+    between_agreement_rate = (between_agreements / between_total * 100) if between_total > 0 else None
+    
+    difference = None
+    if within_agreement_rate is not None and between_agreement_rate is not None:
+        difference = within_agreement_rate - between_agreement_rate
+    
+    return {
+        'within_user_agreement': within_agreement_rate,
+        'between_user_agreement': between_agreement_rate,
+        'difference': difference,
+        'within_comparisons': within_total,
+        'between_comparisons': between_total
+    }
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -181,6 +290,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Input CSV file with preferences (filename or full path)"
+    )
+    parser.add_argument(
+        "--user_agreement",
+        action="store_true",
+        help="Calculate within-user vs between-user agreement (requires user_id column)"
     )
     
     return parser.parse_args()
@@ -240,6 +354,37 @@ def main() -> None:
     if agreement:
         print(f"\nAgreement with human preferences: {agreement['agreement_rate']:.2f}%")
         print(f"  ({agreement['agreement_count']} / {agreement['comparison_count']} comparisons)")
+    
+    # User agreement analysis (if requested and data has user_id)
+    if args.user_agreement:
+        print("\n" + "-" * 60)
+        print("User Profile Agreement Analysis")
+        print("-" * 60)
+        
+        user_agreement = calculate_user_agreement(preferences_df)
+        if user_agreement is None:
+            print("  Not available (no user_id column in data)")
+        elif 'error' in user_agreement:
+            print(f"  {user_agreement['error']}")
+        else:
+            within = user_agreement['within_user_agreement']
+            between = user_agreement['between_user_agreement']
+            diff = user_agreement['difference']
+            
+            if within is not None:
+                print(f"\n  Within-user agreement:  {within:.2f}%")
+                print(f"    ({user_agreement['within_comparisons']:,} pairwise comparisons)")
+            if between is not None:
+                print(f"\n  Between-user agreement: {between:.2f}%")
+                print(f"    ({user_agreement['between_comparisons']:,} pairwise comparisons)")
+            if diff is not None:
+                print(f"\n  Difference (within - between): {diff:+.2f}%")
+                if diff > 10:
+                    print("  --> User profiles appear to be creating distinct preferences")
+                elif diff > 0:
+                    print("  --> Some differentiation, but profiles may need strengthening")
+                else:
+                    print("  --> User profiles are NOT creating meaningful differentiation")
     
     print("\n" + "=" * 60)
 

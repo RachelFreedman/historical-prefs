@@ -6,6 +6,8 @@
 #   ./scripts/run_all.sh --dataset prism --model_size 8B
 #   ./scripts/run_all.sh --dataset ca --model_size 8B --centuries C013,C014,C015
 #   ./scripts/run_all.sh --dataset prism --model_size 8B --n_runs 3 --resume_from C015
+#   ./scripts/run_all.sh --dataset prism --model_size 8B --user_ids all
+#   ./scripts/run_all.sh --dataset prism --model_size 8B --user_ids 1,2,3
 #
 
 set -e
@@ -18,6 +20,7 @@ N_SAMPLES=""  # Empty means all
 START_IDX=0
 RESUME_FROM=""
 CENTURIES="C013,C014,C015,C016,C017,C018,C019,C020,C021"
+USER_IDS=""  # Empty means no user profiles
 
 # NAS paths
 NAS_BASE="/nas/ucb/rachel/historical-prefs"
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
             RESUME_FROM="$2"
             shift 2
             ;;
+        --user_ids)
+            USER_IDS="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 --dataset {ca,prism} [options]"
             echo ""
@@ -65,6 +72,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --start_idx    Starting index (default: 0)"
             echo "  --centuries    Comma-separated list of centuries (default: all C013-C021)"
             echo "  --resume_from  Resume from this century (skip earlier ones)"
+            echo "  --user_ids     User IDs to generate for: 'all' or comma-separated (e.g., '1,2,3')"
             exit 0
             ;;
         *)
@@ -115,6 +123,11 @@ echo "Start index: $START_IDX"
 if [[ -n "$RESUME_FROM" ]]; then
     echo "Resuming from: $RESUME_FROM"
 fi
+if [[ -n "$USER_IDS" ]]; then
+    echo "User IDs: $USER_IDS"
+else
+    echo "User IDs: none (single-user mode)"
+fi
 echo "Log directory: $LOG_DIR"
 echo "=========================================="
 echo ""
@@ -155,15 +168,21 @@ for CENTURY in "${CENTURY_ARRAY[@]}"; do
     echo "Log file: $LOG_FILE"
     echo "=========================================="
     
+    # Build command
+    CMD="python generate_preferences.py"
+    CMD="$CMD --dataset $DATASET"
+    CMD="$CMD --model_size $MODEL_SIZE"
+    CMD="$CMD --model_century $CENTURY"
+    CMD="$CMD --n_samples $N_SAMPLES"
+    CMD="$CMD --start_idx $START_IDX"
+    CMD="$CMD --n_runs $N_RUNS"
+    
+    if [[ -n "$USER_IDS" ]]; then
+        CMD="$CMD --user_ids $USER_IDS"
+    fi
+    
     # Run generation
-    python generate_preferences.py \
-        --dataset "$DATASET" \
-        --model_size "$MODEL_SIZE" \
-        --model_century "$CENTURY" \
-        --n_samples "$N_SAMPLES" \
-        --start_idx "$START_IDX" \
-        --n_runs "$N_RUNS" \
-        2>&1 | tee "$LOG_FILE"
+    $CMD 2>&1 | tee "$LOG_FILE"
     
     echo ""
     echo "Finished $CENTURY at $(date)"
