@@ -1,9 +1,21 @@
+#!/usr/bin/env python3
+"""
+Evaluate preference consistency for PRISM dataset.
+
+This module provides functions to calculate preference consistency metrics,
+measuring how consistently the model chooses the same response when presented
+with the same comparison in different orderings.
+"""
+
 import pandas as pd
 import argparse
 from tqdm import tqdm
 import time
+from pathlib import Path
 
-datapath = 'data/prefs/'
+# Paths configuration
+scratch_datapath = Path('/scratch/rachel/historical-prefs/data/prism/prefs/')
+local_datapath = Path('data/prism/prefs/')
 
 def calculate_preference_consistency(preferences_df):
     """
@@ -86,7 +98,7 @@ def calculate_preference_consistency(preferences_df):
     
     return pd.DataFrame(consistency_results)
 
-def calculated_valid_response_frequency(preferences_df):
+def calculate_valid_response_frequency(preferences_df):
     """
     Calculate the percentage of entries that contain valid responses.
     A valid response is one where model_choice is 1, 2, '1', or '2'.
@@ -105,36 +117,96 @@ def calculated_valid_response_frequency(preferences_df):
     else:
         return 0.0
 
+def calculate_agreement_with_human(preferences_df):
+    """
+    Calculate agreement between model preferences and human preferences.
+    
+    Uses the human_preferred column to determine human preferences.
+    
+    Returns:
+        dict with agreement metrics
+    """
+    # Check if human_preferred column exists
+    if 'human_preferred' not in preferences_df.columns:
+        return None
+    
+    # Filter to valid model responses
+    valid_mask = preferences_df['model_choice'].isin([1, 2, '1', '2'])
+    valid_df = preferences_df[valid_mask].copy()
+    
+    if len(valid_df) == 0:
+        return {'agreement_rate': 0.0, 'total_valid': 0}
+    
+    # Filter to rows with valid human preference
+    valid_df = valid_df[valid_df['human_preferred'].isin(['1', '2', 1, 2])]
+    
+    if len(valid_df) == 0:
+        return {'agreement_rate': 0.0, 'total_valid': 0}
+    
+    # Compare model choice to human preference
+    agreement_count = 0
+    comparison_count = len(valid_df)
+    
+    for _, row in valid_df.iterrows():
+        human_choice = str(row['human_preferred'])
+        model_choice = str(row['model_choice'])
+        
+        if human_choice == model_choice:
+            agreement_count += 1
+    
+    if comparison_count > 0:
+        agreement_rate = (agreement_count / comparison_count) * 100.0
+    else:
+        agreement_rate = 0.0
+    
+    return {
+        'agreement_rate': agreement_rate,
+        'agreement_count': agreement_count,
+        'comparison_count': comparison_count
+    }
+
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate preference consistency")
-    parser.add_argument("--input", type=str, default="preferences_model_8B_C013_pairs0-52122_3runs.csv",
+    parser = argparse.ArgumentParser(description="Evaluate preference consistency for PRISM dataset")
+    parser.add_argument("--input", type=str, default="preferences_model_8B_C013_pairs0-61467_3runs.csv",
                        help="Input CSV file with preferences")
     args = parser.parse_args()
     
+    # Try scratch path first, then local
+    input_path = scratch_datapath / args.input
+    if not input_path.exists():
+        input_path = local_datapath / args.input
+    
     # Load preferences with progress indicator
-    input_path = datapath + args.input
     start_time = time.time()
+    print(f"Loading preferences from {input_path}")
     preferences_df = pd.read_csv(input_path, sep='\t')
     print(f"Loaded {len(preferences_df):,} preferences in {(time.time() - start_time):.2f} seconds")
 
-    # analyze preferences
+    # Analyze preferences
     consistency_df = calculate_preference_consistency(preferences_df)
 
-    # average consistency across all questions
+    # Average consistency across all questions
     avg_consistency = consistency_df['preference_consistency'].mean()
-    print(f"Average preference consistency: {avg_consistency:.2f}%")
+    print(f"\nAverage preference consistency: {avg_consistency:.2f}%")
 
-    # percent of questions with consistency > 70%
+    # Percent of questions with consistency > 70%
     percent_questions_with_consistency_gt_70 = len(consistency_df[consistency_df['preference_consistency'] > 70]) / len(consistency_df) * 100.0
     print(f"Percent of questions with consistency > 70%: {percent_questions_with_consistency_gt_70:.2f}%")
 
-    # percent of questions with consistency > 80%
+    # Percent of questions with consistency > 80%
     percent_questions_with_consistency_gt_80 = len(consistency_df[consistency_df['preference_consistency'] > 80]) / len(consistency_df) * 100.0
     print(f"Percent of questions with consistency > 80%: {percent_questions_with_consistency_gt_80:.2f}%")
 
-    # calculate valid response frequency
-    valid_response_frequency = calculated_valid_response_frequency(preferences_df)
+    # Calculate valid response frequency
+    valid_response_frequency = calculate_valid_response_frequency(preferences_df)
     print(f"Valid response frequency: {valid_response_frequency:.2f}%")
+    
+    # Calculate agreement with human preferences (if available)
+    agreement = calculate_agreement_with_human(preferences_df)
+    if agreement:
+        print(f"\nAgreement with human preferences: {agreement['agreement_rate']:.2f}%")
+        print(f"  ({agreement['agreement_count']} / {agreement['comparison_count']} comparisons)")
 
 if __name__ == "__main__":
     main()
+

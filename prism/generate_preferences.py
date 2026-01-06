@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate preferences using the ProgressGym historical model.
+Generate preferences using the ProgressGym historical model for PRISM dataset.
 This script loads the model and generates responses to pairwise comparison questions.
 
-The ProgressGym model is a 13th-century historical LLM based on Llama-3-8B,
+The ProgressGym model is a historical LLM based on Llama-3-8B,
 trained on historical text data to reflect moral perspectives from that era.
 It can be used to generate comparative assessments between responses.
 """
@@ -18,14 +18,18 @@ import os
 import subprocess
 from collections import defaultdict
 from huggingface_hub import HfApi
-from evaluate_preferences import calculate_preference_consistency
-
-# Model configuration
-datapath = 'data/'
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from prism.evaluate_preferences import calculate_preference_consistency
 
 # Set HuggingFace cache to /scratch to avoid disk space issues
 os.environ['HF_HOME'] = '/scratch/rachel/ProgressGym'
 os.environ['TRANSFORMERS_CACHE'] = '/scratch/rachel/ProgressGym'
+os.environ['TMPDIR'] = '/scratch/rachel/tmp'
+
+# Paths configuration
+scratch_datapath = Path('/scratch/rachel/historical-prefs/data/prism/')
+local_datapath = Path('data/prism/')
 
 def find_available_gpu():
     """Find the first GPU with low memory usage (< 10% used)."""
@@ -112,7 +116,7 @@ def load_model_and_tokenizer(model_size, model_century):
         cache_dir='/scratch/rachel/ProgressGym'
     )
     
-    print("Model loaded successfully!")
+    print("Model loaded successfully.")
     return model, tokenizer
 
 def generate_preference(model, tokenizer, prompt, response_1, response_2):
@@ -181,13 +185,13 @@ Which option is better? Answer with just the number "1" or just the number "2". 
             return '-1'  # Invalid response
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate preferences using historical LLM")
+    parser = argparse.ArgumentParser(description="Generate preferences using historical LLM for PRISM dataset")
     parser.add_argument("--model_size", type=str, default="8B",
                        help="Model size (default: 8B, options: 8B, 70B)")
     parser.add_argument("--model_century", type=str, default="C013",
-                       help="Model century (default: C013, options: C013, C014, C015, C016, C017, C018, C019, C020, C021")
-    parser.add_argument("--input", type=str, default=datapath + "questions_pairwise.csv",
-                       help="Input CSV file with comparisons")
+                       help="Model century (default: C013, options: C013, C014, C015, C016, C017, C018, C019, C020, C021)")
+    parser.add_argument("--input", type=str, default=None,
+                       help="Input CSV file with comparisons (default: data/prism/questions_pairwise.csv)")
     parser.add_argument("--n_samples", type=int, default=10,
                        help="Number of comparisons to process (default: 10)")
     parser.add_argument("--start_idx", type=int, default=0,
@@ -195,6 +199,10 @@ def main():
     parser.add_argument("-n", "--n_runs", type=int, default=1,
                        help="Number of times to run each question in each order (default: 1)")
     args = parser.parse_args()
+    
+    # Set default input path
+    if args.input is None:
+        args.input = str(scratch_datapath / "questions_pairwise.csv")
     
     # Find available GPU and set CUDA_VISIBLE_DEVICES
     available_gpu = find_available_gpu()
@@ -220,11 +228,11 @@ def main():
     
     # Setup checkpointing - save every 1000 comparisons to avoid data loss
     checkpoint_interval = 1000
-    scratch_output_dir = Path('/scratch/rachel/historical-prefs/data/prefs')
+    scratch_output_dir = scratch_datapath / 'prefs'
     scratch_output_dir.mkdir(parents=True, exist_ok=True)
     
     # Also create local output dir for symlink
-    local_output_dir = Path(datapath) / 'prefs'
+    local_output_dir = local_datapath / 'prefs'
     local_output_dir.mkdir(parents=True, exist_ok=True)
     
     filename = f"preferences_model_{args.model_size}_{args.model_century}_pairs{args.start_idx}-{end_idx}_{args.n_runs}runs.csv"
@@ -301,6 +309,7 @@ def main():
                     'response_1_id': row['response_1_id'],
                     'response_2_id': row['response_2_id'],
                     'model_choice': choice,
+                    'human_preferred': row.get('human_preferred', ''),
                     'prompt': row['prompt'],
                     'response_1': row['response_1'],
                     'response_2': row['response_2'],
@@ -317,6 +326,7 @@ def main():
                     'dispreferred_response_id': -1,
                     'response_1_id': row['response_1_id'],
                     'response_2_id': row['response_2_id'],
+                    'human_preferred': row.get('human_preferred', ''),
                     'prompt': row['prompt'],
                     'response_1': row['response_1'],
                     'response_2': row['response_2'],
@@ -345,6 +355,10 @@ def main():
                     preferred_response_id = -1
                     dispreferred_response_id = -1
                 
+                # For reversed order, human_preferred flips: if original was '2', reversed is '1'
+                original_human_pref = row.get('human_preferred', '')
+                reversed_human_pref = '1' if original_human_pref == '2' else ('2' if original_human_pref == '1' else '')
+                
                 preferences.append({
                     'question_id': row['question_id'],
                     'preferred_response_id': preferred_response_id,
@@ -352,6 +366,7 @@ def main():
                     'response_1_id': row['response_2_id'],  # Swap: response_2_id becomes response_1_id
                     'response_2_id': row['response_1_id'],  # Swap: response_1_id becomes response_2_id
                     'model_choice': choice_reversed,
+                    'human_preferred': reversed_human_pref,
                     'prompt': row['prompt'],
                     'response_1': row['response_2'],  # Swap: response_2 becomes response_1
                     'response_2': row['response_1'],  # Swap: response_1 becomes response_2
@@ -361,6 +376,9 @@ def main():
                 
             except Exception as e:
                 print(f"\nError processing row {idx} (reversed order, run {run_num + 1}): {e}")
+                original_human_pref = row.get('human_preferred', '')
+                reversed_human_pref = '1' if original_human_pref == '2' else ('2' if original_human_pref == '1' else '')
+                
                 preferences.append({
                     'question_id': row['question_id'],
                     'model_choice': '-1',
@@ -368,6 +386,7 @@ def main():
                     'dispreferred_response_id': -1,
                     'response_1_id': row['response_2_id'],  # Swap: response_2_id becomes response_1_id
                     'response_2_id': row['response_1_id'],  # Swap: response_1_id becomes response_2_id
+                    'human_preferred': reversed_human_pref,
                     'prompt': row['prompt'],
                     'response_1': row['response_2'],  # Swap: response_2 becomes response_1
                     'response_2': row['response_1'],  # Swap: response_1 becomes response_2
@@ -444,3 +463,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
